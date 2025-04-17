@@ -17,3 +17,7 @@ Paper: https://arxiv.org/pdf/2002.12247
 ### SuperGlue
 SuperGlue is a deep learning model designed to match keypoints between pairs of images with high accuracy, making it ideal for tasks like scene matching and visual localization. It builds on traditional keypoint detectors (like SuperPoint) by using a graph neural network to reason about spatial relationships and context between keypoints in both images. SuperGlue treats matching as a graph matching problem, leveraging attention mechanisms—similar to those in transformers—to find robust correspondences even under challenging conditions like changes in viewpoint, lighting, or partial occlusions. The result is a powerful, end-to-end trainable system that significantly improves matching quality compared to traditional approaches. <br />
 Paper: https://arxiv.org/pdf/1911.11763
+
+## Dataset
+
+https://zenodo.org/records/1243106
