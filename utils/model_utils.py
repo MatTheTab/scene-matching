@@ -1,4 +1,5 @@
 import os
+import re
 
 import pandas as pd
 import numpy as np
@@ -156,7 +157,8 @@ def evaluate_accuracy_per_view(base_df, embeddings_df):
         top10_correct = 0
         total = 0
 
-        for _, row in tqdm(base_df.iterrows(), f"Calculating results for view {view}"):
+        print(f"Calculating results for view {view}")
+        for _, row in tqdm(base_df.iterrows()):
             loc1 = row['location_name_1']
             loc2_true = row['location_name_2']
             
@@ -192,3 +194,93 @@ def evaluate_accuracy_per_view(base_df, embeddings_df):
         }
     
     return results
+
+
+def evaluate_accuracy_majority_vote(base_df, embeddings_df, top_ns=[1, 5, 10]):
+    # Create view-specific embedding dicts
+    emb_by_view = {
+        view: dict(zip(df_view['location_name'], df_view['embedding']))
+        for view, df_view in embeddings_df.groupby('view')
+    }
+
+    correct_top = {n: 0 for n in top_ns}
+    total = 0
+
+    print(f"Calculating results")
+    for _, row in tqdm(base_df.iterrows()):
+        loc1 = row['location_name_1']
+        loc2_true = row['location_name_2']
+        votes = []
+
+        for view in range(5):
+            emb_dict = emb_by_view.get(view, {})
+            if loc1 not in emb_dict:
+                continue
+
+            emb1 = emb_dict[loc1]
+            loc2_candidates = [loc for loc in base_df['location_name_2'].unique() if loc in emb_dict]
+            emb2_list = [emb_dict[loc2] for loc2 in loc2_candidates]
+            
+            if not emb2_list:
+                continue
+
+            dists = cosine_distances([emb1], emb2_list)[0]
+            sorted_indices = np.argsort(dists)
+            ranked_locs = [loc2_candidates[i] for i in sorted_indices]
+
+            votes.extend(ranked_locs[:max(top_ns)])  # gather top-N votes per view
+
+        if not votes:
+            continue
+
+        total += 1
+        vote_counts = Counter(votes)
+        ranked_vote_list = [loc for loc, _ in vote_counts.most_common()]
+
+        for n in top_ns:
+            top_n_preds = ranked_vote_list[:n]
+            if loc2_true in top_n_preds:
+                correct_top[n] += 1
+
+    return {
+        f'top{n}_accuracy': correct_top[n] / total if total > 0 else 0
+        for n in top_ns
+    } | {'count': total}
+
+
+def save_embeddings_to_npy(embeddings_df, output_folder='embeddings_npy'):
+    """
+    Saves each embedding as a separate .npy file in the format <location_name>-<view>.npy
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    
+    for _, row in embeddings_df.iterrows():
+        location = row['location_name']
+        view = row['view']
+        embedding = row['embedding']
+        
+        file_name = f"{location}-{view}.npy"
+        path = os.path.join(output_folder, file_name)
+        np.save(path, embedding)
+
+def load_embeddings_from_npy_folder(folder='embeddings_npy'):
+    """
+    Loads all .npy files in a folder into a DataFrame with columns:
+    - 'location_name'
+    - 'view'
+    - 'embedding'
+    """
+    data = []
+    pattern = re.compile(r'^(.*)-(\d+)\.npy$')  # matches <location_name>-<view>.npy
+
+    print("Loading embeddings...")
+    for file in tqdm(os.listdir(folder)):
+        if file.endswith('.npy'):
+            match = pattern.match(file)
+            if match:
+                location_name = match.group(1)
+                view = int(match.group(2))
+                embedding = np.load(os.path.join(folder, file))
+                data.append({'location_name': location_name, 'view': view, 'embedding': embedding})
+
+    return pd.DataFrame(data)
