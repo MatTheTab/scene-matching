@@ -8,17 +8,23 @@ from collections import Counter
 import random
 import os
 
-def compare_ORB(img1, img2, nfeatures=500, ratio_thresh=0.75):
+def get_ORB(img1, nfeatures=500):
     detector = cv2.ORB_create(nfeatures=nfeatures)
+    orb_kp1, orb_des1 = detector.detectAndCompute(img1, None)
+    return orb_kp1, orb_des1
+
+def get_SIFT(img1):
+    detector = cv2.SIFT_create()
+    sift_kp1, sift_des1 = detector.detectAndCompute(img1, None)
+    return sift_kp1, sift_des1
+
+def compare_ORB(orb_des1, orb_des2, ratio_thresh=0.75):
     norm_type = cv2.NORM_HAMMING
     matcher = cv2.BFMatcher(norm_type)
 
-    orb_kp1, orb_des1 = detector.detectAndCompute(img1, None)
-    orb_kp2, orb_des2 = detector.detectAndCompute(img2, None)
-
     if orb_des1 is None or orb_des2 is None:
         return []  # No features found
-
+    
     matches = matcher.knnMatch(orb_des1, orb_des2, k=2)
     if len(matches) < 2:
         good = []
@@ -26,16 +32,12 @@ def compare_ORB(img1, img2, nfeatures=500, ratio_thresh=0.75):
         good = [m for m, n in matches if m.distance < ratio_thresh * n.distance]
     return good
 
-def compare_SIFT(img1, img2, ratio_thresh=0.75):
-    detector = cv2.SIFT_create()
+def compare_SIFT(sift_des1, sift_des2, ratio_thresh=0.75):
     norm_type = cv2.NORM_L2
     matcher = cv2.BFMatcher(norm_type)
 
-    sift_kp1, sift_des1 = detector.detectAndCompute(img1, None)
-    sift_kp2, sift_des2 = detector.detectAndCompute(img2, None)
-
     if sift_des1 is None or sift_des2 is None:
-        return []
+        return [] # No features found
 
     matches = matcher.knnMatch(sift_des1, sift_des2, k=2)
     if len(matches) < 2:
@@ -57,29 +59,58 @@ def get_baseline(data_df, method, **kargs):
 
 def get_baseline_single_view(locations1, locations2, view, method, **kargs):
     similarities = {}
-
+    desc_loc1 = {}
+    desc_loc2 = {}
+    
+    print("Precomputing descriptors for locations 1")
     for location_1 in tqdm(locations1):
-        similarities[location_1] = {}
         img_path_1 = f"./Eynsham/Images/{location_1}-{view}.ppm"
         img_1 = cv2.imread(img_path_1, cv2.IMREAD_GRAYSCALE)
         if img_1 is None or not (img_1.dtype == np.uint8) or not (img_1.min() >= 0) or not (img_1.max() <= 255):
             print(f"Warning: Could not load {img_path_1}")
             continue
+        
+        if method == "ORB":
+            nfeatures = kargs.get("nfeatures", 500)
+            kp1, des1 = get_ORB(img_1, nfeatures=nfeatures)
+        elif method == "SIFT":
+            kp1, des1 = get_SIFT(img_1)
+        else:
+            raise ValueError("Method must be ORB or SIFT")
+        desc_loc1[location_1] = des1
+
+    print("Precomputing descriptors for locations 2")
+    for location_2 in tqdm(locations2):
+        img_path_2 = f"./Eynsham/Images/{location_2}-{view}.ppm"
+        img_2 = cv2.imread(img_path_2, cv2.IMREAD_GRAYSCALE)
+        if img_2 is None or not (img_2.dtype == np.uint8) or not (img_2.min() >= 0) or not (img_2.max() <= 255):
+            print(f"Warning: Could not load {img_path_2}")
+            continue
+        
+        if method == "ORB":
+            nfeatures = kargs.get("nfeatures", 500)
+            kp2, des2 = get_ORB(img_2, nfeatures=nfeatures)
+        elif method == "SIFT":
+            kp2, des2 = get_SIFT(img_2)
+        else:
+            raise ValueError("Method must be ORB or SIFT")
+        desc_loc2[location_2] = des2
+
+
+    print("Calculating distances")
+    for location_1 in tqdm(locations1):
+        similarities[location_1] = {}
+        des1 = desc_loc1[location_1]
 
         for location_2 in locations2:
-            img_path_2 = f"./Eynsham/Images/{location_2}-{view}.ppm"
-            img_2 = cv2.imread(img_path_2, cv2.IMREAD_GRAYSCALE)
-            if img_2 is None or not (img_2.dtype == np.uint8) or not (img_2.min() >= 0) or not (img_2.max() <= 255):
-                print(f"Warning: Could not load {img_path_2}")
-                continue
+            des2 = desc_loc2[location_2]
 
             if method == "ORB":
-                nfeatures = kargs.get("nfeatures", 500)
                 ratio_thresh = kargs.get("ratio_thresh", 0.75)
-                good = compare_ORB(img_1, img_2, nfeatures=nfeatures, ratio_thresh=ratio_thresh)
+                good = compare_ORB(des1, des2, ratio_thresh=ratio_thresh)
             elif method == "SIFT":
                 ratio_thresh = kargs.get("ratio_thresh", 0.75)
-                good = compare_SIFT(img_1, img_2, ratio_thresh=ratio_thresh)
+                good = compare_SIFT(des1, des2, ratio_thresh=ratio_thresh)
             else:
                 raise ValueError("Method must be ORB or SIFT")
 
