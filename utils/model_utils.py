@@ -16,6 +16,7 @@ import torch
 from torchvision import transforms
 
 from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics.pairwise import cosine_similarity
 
 def load_model(model_name, gpu=True):
     models = ["OpenIBL"]
@@ -74,7 +75,7 @@ def extract_location_embeddings_OpenIBL(df, model, image_folder='Eynsham/Images'
 
     return pd.DataFrame(records)
 
-def display_gt_pair(match_df, match_df_row_index, view=0, img_dir="Eynsham\Images\\"):
+def display_gt_pair(match_df, match_df_row_index, view=0, img_dir="Eynsham/Images/"):
     row = match_df.iloc[match_df_row_index]
     img_1_name, img_2_name = row["location_name_1"], row["location_name_2"]
     img_1_path = img_dir + img_1_name + f"-{view}.ppm"
@@ -284,3 +285,87 @@ def load_embeddings_from_npy_folder(folder='embeddings_npy'):
                 data.append({'location_name': location_name, 'view': view, 'embedding': embedding})
 
     return pd.DataFrame(data)
+
+def extract_concatenate_embeddings_OpenIBL(df, model, image_folder='Eynsham/Images'):
+    # Prepare transform
+    transformer = transforms.Compose([
+        transforms.Resize((480, 640)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.48501960784313836, 0.4579568627450961, 0.4076039215686255],
+            std=[0.00392156862745098] * 3
+        )
+    ])
+        
+    # Extract unique location names
+    unique_locations = pd.unique(df[['location_name_1', 'location_name_2']].values.ravel())
+    
+    locations_embeddings = {}
+
+    for location in tqdm(unique_locations, desc="Processing Locations"):
+        concat_embedding = np.array([])
+        for view in range(5):
+            image_filename = f"{location}-{view}.ppm"
+            image_path = os.path.join(image_folder, image_filename)
+
+            if not os.path.exists(image_path):
+                print(f"Warning: Image not found: {image_path}")
+                continue
+
+            try:
+                # Load and transform image
+                pil_img = Image.open(image_path).convert('RGB')
+                img_tensor = transformer(pil_img).unsqueeze(0).cuda()
+
+                # Get embedding
+                with torch.no_grad():
+                    embedding = model(img_tensor)[0].cpu().numpy()
+                concat_embedding = np.concatenate((concat_embedding, embedding), axis=0)
+
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
+        locations_embeddings[location] = concat_embedding.copy()
+    return locations_embeddings
+
+def concat_evaluate_matching_accuracy(data_df, location_embeddings):
+    top1_correct = 0
+    top5_correct = 0
+    top10_correct = 0
+
+    all_location_2_names = data_df['location_name_2'].unique()
+    all_location_2_embeddings = {loc: location_embeddings[loc] for loc in all_location_2_names}
+
+    for i in range(len(data_df)):
+        loc1 = data_df.iloc[i]['location_name_1']
+        loc2_correct = data_df.iloc[i]['location_name_2']
+
+        if loc1 not in location_embeddings or loc2_correct not in location_embeddings:
+            continue
+
+        emb1 = location_embeddings[loc1].reshape(1, -1)  # (1, D)
+        
+        similarities = []
+        for loc2 in all_location_2_names:
+            emb2 = location_embeddings.get(loc2)
+            if emb2 is None:
+                continue
+            emb2 = emb2.reshape(1, -1)
+            sim = cosine_similarity(emb1, emb2)[0][0]
+            similarities.append((loc2, sim))
+
+        # Sort by similarity, descending
+        similarities.sort(key=lambda x: x[1], reverse=True)
+
+        # Extract top N
+        top_matches = [loc for loc, _ in similarities]
+
+        if loc2_correct == top_matches[0]:
+            top1_correct += 1
+        if loc2_correct in top_matches[:5]:
+            top5_correct += 1
+        if loc2_correct in top_matches[:10]:
+            top10_correct += 1
+
+    total = len(data_df)
+
+    return top1_correct / total, top5_correct / total, top10_correct / total
