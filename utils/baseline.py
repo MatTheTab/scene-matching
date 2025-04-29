@@ -254,3 +254,96 @@ def evaluate_accuracy_weighted_aggregation(data_df, baseline_results, top_k=5):
     topk_acc = topk_correct / total
     return acc, topk_acc
 
+
+def deep_evaluate_accuracy_single_view(data_df, baseline_results, view=0, top_k=5):
+    correct = 0
+    topk_correct = 0
+    total = len(data_df)
+
+    for i in range(total):
+        location_1 = data_df.iloc[i]["location_name_1"]
+        correct_location_2 = data_df.iloc[i]["location_name_2"]
+
+        similarity_dict = baseline_results[view].get(location_1, {})
+        if not similarity_dict:
+            continue
+
+        # Sort by float similarity score in descending order
+        ranked = sorted(similarity_dict.items(), key=lambda x: x[1], reverse=True)
+        top_matches = [loc for loc, _ in ranked]
+
+        if top_matches and top_matches[0] == correct_location_2:
+            correct += 1
+        if correct_location_2 in top_matches[:top_k]:
+            topk_correct += 1
+
+    acc = correct / total
+    topk_acc = topk_correct / total
+    return acc, topk_acc
+
+
+def deep_evaluate_accuracy_freq_aggregation(data_df, baseline_results, top_k=5):
+    correct = 0
+    topk_correct = 0
+    total = len(data_df)
+
+    for i in range(total):
+        location_1 = data_df.iloc[i]["location_name_1"]
+        correct_location_2 = data_df.iloc[i]["location_name_2"]
+
+        all_ranks = []
+        for view in range(5):
+            similarity_dict = baseline_results[view].get(location_1, {})
+            if not similarity_dict:
+                continue
+
+            ranked = sorted(similarity_dict.items(), key=lambda x: x[1], reverse=True)
+            top_matches = [loc for loc, _ in ranked[:top_k]]
+            all_ranks.extend(top_matches)
+
+        top_frequent = [item for item, _ in Counter(all_ranks).most_common()]
+        if top_frequent and top_frequent[0] == correct_location_2:
+            correct += 1
+        if correct_location_2 in top_frequent[:top_k]:
+            topk_correct += 1
+
+    acc = correct / total
+    topk_acc = topk_correct / total
+    return acc, topk_acc
+
+def deep_evaluate_accuracy_weighted_aggregation(data_df, baseline_results, top_k=5):
+    correct = 0
+    topk_correct = 0
+    total = len(data_df)
+
+    for i in range(total):
+        location_1 = data_df.iloc[i]["location_name_1"]
+        correct_location_2 = data_df.iloc[i]["location_name_2"]
+
+        score_dict = {}
+
+        for view in range(5):
+            similarity_dict = baseline_results[view].get(location_1, {})
+            if not similarity_dict:
+                continue
+
+            for loc2, sim_score in similarity_dict.items():
+                if loc2 in score_dict:
+                    score_dict[loc2] += sim_score
+                else:
+                    score_dict[loc2] = sim_score
+
+        if not score_dict:
+            continue
+
+        ranked = sorted(score_dict.items(), key=lambda x: x[1], reverse=True)
+        top_matches = [loc for loc, _ in ranked]
+
+        if top_matches[0] == correct_location_2:
+            correct += 1
+        if correct_location_2 in top_matches[:top_k]:
+            topk_correct += 1
+
+    acc = correct / total
+    topk_acc = topk_correct / total
+    return acc, topk_acc
