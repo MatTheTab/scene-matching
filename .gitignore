@@ -1,3 +1,4 @@
 Eynsham/
 utils/__pycache__/
 data/saved_embeddings
+lightning_logs/
