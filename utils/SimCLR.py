@@ -22,14 +22,14 @@ import random
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import GradientAccumulationScheduler
 from pytorch_lightning.callbacks import ModelCheckpoint
-from torchvision.models import resnet18
+from torchvision.models import resnet18, ResNet18_Weights
 from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 
 BATCH_SIZE = 64
 WEIGHT_DECAY = 1e-6
-MAX_EPOCHS = 10 #Change to a higher value later
+MAX_EPOCHS = 100
 OPTIMIZER = "adam"
 LR = 3e-4
 GRADIENT_ACCUMULATION_STEPS = 5
@@ -150,9 +150,9 @@ class MultiViewImageDataset(Dataset):
             views2 = views1
         return views1, views2
 
-def get_data_loader(data_df, batch_size, base_path='Eynsham/Images', transform=None, shuffle=True):
-    dataset = MultiViewImageDataset(data_df, base_path=base_path, transform=transform)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+def get_data_loader(data_df, batch_size, base_path='Eynsham/Images', transform=None, shuffle=True, num_views=5):
+    dataset = MultiViewImageDataset(data_df, base_path=base_path, transform=transform, num_views=num_views)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=12)
     return loader
 
 def plot_sample_batch(data_loader, num_examples=4, num_views=5):
@@ -211,17 +211,20 @@ class ContrastiveLoss(nn.Module):
         return loss
 
 class AddProjection(nn.Module):
-    def __init__(self, embedding_size, mlp_dim=512):
+    def __init__(self, embedding_size, mlp_dim=512, use_adapter=True):
         super(AddProjection, self).__init__()
         
-        self.channel_adapter = nn.Conv2d(
-            in_channels=5, 
-            out_channels=3, 
-            kernel_size=1, 
-            stride=1
-        )
+        self.use_adapter = use_adapter
+        if self.use_adapter:
 
-        self.backbone = models.resnet18(pretrained=False, num_classes=mlp_dim)
+            self.channel_adapter = nn.Conv2d(
+                in_channels=5, 
+                out_channels=3, 
+                kernel_size=1, 
+                stride=1
+            )
+
+        self.backbone = models.resnet18(weights=None, num_classes=mlp_dim)
         self.backbone.fc = nn.Identity()
 
         self.projection = nn.Sequential(
@@ -233,11 +236,42 @@ class AddProjection(nn.Module):
         )
 
     def forward(self, x, return_embedding=False):
-        x = self.channel_adapter(x)  # Shape: [B, 5, 224, 224] → [B, 3, 224, 224]
+        if self.use_adapter:
+            x = self.channel_adapter(x)  # Shape: [B, 5, 224, 224] → [B, 3, 224, 224]
         embedding = self.backbone(x)
         if return_embedding:
             return embedding
         return self.projection(embedding)
+    
+class AddProjectionParallel(nn.Module):
+    def __init__(self, embedding_size, mlp_dim=512, view_size=5):
+        super(AddProjectionParallel, self).__init__()
+
+        self.backbone = models.resnet18(weights=None, num_classes=mlp_dim)
+        self.backbone.fc = nn.Identity()
+        self.embedding_concat = nn.Linear(view_size * mlp_dim, mlp_dim)
+        self.projection = nn.Sequential(
+            nn.Linear(in_features=mlp_dim, out_features=mlp_dim),
+            nn.BatchNorm1d(mlp_dim),
+            nn.ReLU(),
+            nn.Linear(in_features=mlp_dim, out_features=embedding_size),
+            nn.BatchNorm1d(embedding_size),
+        )
+
+    def forward(self, x, return_embedding=False):
+        embedding_all_views = []
+        for i in range(x.shape[1]):
+            view_x = x[:, i]
+            view_x = view_x.reshape(view_x.shape[0], 1, view_x.shape[1], view_x.shape[2])
+            if view_x.shape[1] == 1:
+                view_x = view_x.repeat(1, 3, 1, 1)
+            embedding = self.backbone(view_x)
+            embedding_all_views.append(embedding)
+        embedding_all_views = torch.cat(embedding_all_views, dim=1)
+        final_embedding = F.relu(self.embedding_concat(embedding_all_views))
+        if return_embedding:
+            return final_embedding
+        return self.projection(final_embedding)
     
 def define_param_groups(model, weight_decay, optimizer_name):
     def exclude_from_wd_and_adaptation(name):
@@ -262,9 +296,12 @@ def define_param_groups(model, weight_decay, optimizer_name):
 
 
 class SimCLR_pl(pl.LightningModule):
-    def __init__(self, embedding_size, mlp_dim):
+    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False):
         super().__init__()
-        self.model = AddProjection(embedding_size=embedding_size, mlp_dim=mlp_dim)
+        if parallel_views:
+            self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
+        else:
+            self.model = AddProjection(embedding_size=embedding_size, mlp_dim=mlp_dim, use_adapter=use_adapter)
         self.loss = ContrastiveLoss(BATCH_SIZE, device, temperature=0.5)
 
     def forward(self, X):
@@ -293,8 +330,8 @@ class SimCLR_pl(pl.LightningModule):
 
         return [optimizer], [scheduler_warmup]
     
-def get_embeddings(model, df, base_path, column_name, transform, batch_size=64, device='cuda'):
-    dataset = MultiViewImageDataset(df.assign(location_name_2=df[column_name]), base_path=base_path, num_views=5, transform=transform)
+def get_embeddings(model, df, base_path, column_name, transform, batch_size=64, device='cuda', num_views=5):
+    dataset = MultiViewImageDataset(df.assign(location_name_2=df[column_name]), base_path=base_path, num_views=num_views, transform=transform)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     all_embeddings = []
 
@@ -305,7 +342,7 @@ def get_embeddings(model, df, base_path, column_name, transform, batch_size=64, 
         for batch in loader:
             batch = batch[0]
             batch = batch.to(device)
-            emb = model(batch)
+            emb = model(batch,)
             all_embeddings.append(emb.cpu())
 
     return torch.cat(all_embeddings, dim=0)
@@ -316,13 +353,13 @@ def project_embeddings(embeddings, target_dim=2):
     pca = PCA(n_components=target_dim)
     return torch.tensor(pca.fit_transform(embeddings), dtype=torch.float)
 
-def plot_embedding_match_2d(model, df, base_path, transform, device='cuda', batch_size=64, use_pca = True):
-    emb_2 = get_embeddings(model, df, base_path, 'location_name_2', transform, batch_size, device)
+def plot_embedding_match_2d(model, df, base_path, transform, device='cuda', batch_size=64, use_pca = True, num_views=5):
+    emb_2 = get_embeddings(model, df, base_path, 'location_name_2', transform, batch_size, device, num_views=num_views)
 
     idx = random.randint(0, len(df) - 1)
     sample_df = df.iloc[[idx]]
-    emb_1 = get_embeddings(model, sample_df, base_path, 'location_name_1', transform, batch_size=1, device=device)
-    emb_2_sample = get_embeddings(model, sample_df, base_path, 'location_name_2', transform, batch_size=1, device=device)
+    emb_1 = get_embeddings(model, sample_df, base_path, 'location_name_1', transform, batch_size=1, device=device, num_views=num_views)
+    emb_2_sample = get_embeddings(model, sample_df, base_path, 'location_name_2', transform, batch_size=1, device=device, num_views=num_views)
 
     if use_pca:
         complete_tensor = torch.cat([emb_2, emb_2_sample, emb_1], dim=0)
@@ -344,24 +381,39 @@ def plot_embedding_match_2d(model, df, base_path, transform, device='cuda', batc
     plt.grid(True)
     plt.show()
 
-def evaluate_embedding_accuracy(model, df, base_path, transform, batch_size=64, device='cuda'):
-    emb_2 = get_embeddings(model, df, base_path, 'location_name_2', transform, batch_size, device)
-    emb_1 = get_embeddings(model, df, base_path, 'location_name_1', transform, batch_size, device)
+
+def evaluate_embedding_accuracy(model, df, base_path, transform, batch_size=64, device='cuda', num_views=5):
+    emb_2 = get_embeddings(model, df, base_path, 'location_name_2', transform, batch_size, device, num_views=num_views)
+    emb_1 = get_embeddings(model, df, base_path, 'location_name_1', transform, batch_size, device, num_views=num_views)
 
     emb_2 = F.normalize(emb_2, dim=1)
     emb_1 = F.normalize(emb_1, dim=1)
 
-    similarities = emb_1 @ emb_2.T
+    similarities = emb_1 @ emb_2.T  # cosine similarity matrix: [N, N]
 
     top1, top5, top10 = 0, 0, 0
     N = len(df)
+    distances = []
 
     for i in range(N):
         top_k = torch.topk(similarities[i], k=10).indices
-        if i == top_k[0].item():
+        top1_index = top_k[0].item()
+
+        if i == top1_index:
             top1 += 1
         if i in top_k[:5]:
             top5 += 1
         if i in top_k:
             top10 += 1
-    return top1 / N, top5 / N, top10 / N
+
+        # Get true and predicted coordinates
+        x1, y1 = df.iloc[i]['N_1'], df.iloc[i]['E_1']
+        x2, y2 = df.iloc[top1_index]['N_2'], df.iloc[top1_index]['E_2']
+
+        # Euclidean distance (same units as input coordinates)
+        dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+        distances.append(dist)
+
+    mean_distance = np.mean(distances)
+
+    return top1 / N, top5 / N, top10 / N, mean_distance
