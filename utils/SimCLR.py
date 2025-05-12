@@ -247,6 +247,7 @@ class AddProjectionParallel(nn.Module):
     def __init__(self, embedding_size, mlp_dim=512, view_size=5):
         super(AddProjectionParallel, self).__init__()
 
+        self.mlp_dim = mlp_dim
         self.backbone = models.resnet18(weights=None, num_classes=mlp_dim)
         self.backbone.fc = nn.Identity()
         self.embedding_concat = nn.Linear(view_size * mlp_dim, mlp_dim)
@@ -259,15 +260,11 @@ class AddProjectionParallel(nn.Module):
         )
 
     def forward(self, x, return_embedding=False):
-        embedding_all_views = []
-        for i in range(x.shape[1]):
-            view_x = x[:, i]
-            view_x = view_x.reshape(view_x.shape[0], 1, view_x.shape[1], view_x.shape[2])
-            if view_x.shape[1] == 1:
-                view_x = view_x.repeat(1, 3, 1, 1)
-            embedding = self.backbone(view_x)
-            embedding_all_views.append(embedding)
-        embedding_all_views = torch.cat(embedding_all_views, dim=1)
+        B, V, H, W = x.shape #Batch, Views, Height, Width
+        x = x.view(B * V, 1, H, W) #BatchxViews, Channels, Height, Width
+        x = x.repeat(1, 3, 1, 1)
+        embedding_all_views = self.backbone(x)
+        embedding_all_views = embedding_all_views.view(B, V*self.mlp_dim)
         final_embedding = F.relu(self.embedding_concat(embedding_all_views))
         if return_embedding:
             return final_embedding
