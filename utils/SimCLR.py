@@ -27,7 +27,7 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 WEIGHT_DECAY = 1e-6
 MAX_EPOCHS = 100
 OPTIMIZER = "adam"
