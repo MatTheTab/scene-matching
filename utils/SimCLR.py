@@ -149,9 +149,65 @@ class MultiViewImageDataset(Dataset):
             views1 = torch.cat(temp_views, dim=0)
             views2 = views1
         return views1, views2
+    
+class FineTuniningMultiViewImageDataset(Dataset):
+    def __init__(self, dataframe, base_path, num_views=5, transform=None):
+        self.df = dataframe
+        self.base_path = base_path
+        self.num_views = num_views
+        self.transform = transform
 
-def get_data_loader(data_df, batch_size, base_path='Eynsham/Images', transform=None, shuffle=True, num_views=5):
-    dataset = MultiViewImageDataset(data_df, base_path=base_path, transform=transform, num_views=num_views)
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        loc_1_name = self.df.iloc[idx]['location_name_1']
+        loc_2_name = self.df.iloc[idx]['location_name_2']
+        views_1 = []
+        views_2 = []
+        for i in range(self.num_views):
+            file_name_1 = f"{loc_1_name}-{i}.ppm"
+            full_path_1 = os.path.join(self.base_path, file_name_1)
+            file_name_2 = f"{loc_2_name}-{i}.ppm"
+            full_path_2 = os.path.join(self.base_path, file_name_2)
+
+            try:
+                img_1 = Image.open(full_path_1).convert('L')
+                views_1.append(img_1)
+            except FileNotFoundError:
+                print(f"Missing image: {full_path_1}")
+                views_1.append(Image.new('L', (224, 224)))
+
+            try:
+                img_2 = Image.open(full_path_2).convert('L')
+                views_2.append(img_2)
+            except FileNotFoundError:
+                print(f"Missing image: {full_path_2}")
+                views_2.append(Image.new('L', (224, 224)))
+
+        if self.transform:
+            views1, _ = self.transform(views_1)
+            views_2, _ = self.transform(views_2)
+
+        else:
+            temp_views_1 = []
+            temp_views_2 = []
+            for view in views_1:
+                temp_view = T.ToTensor()(view)
+                temp_views_1.append(temp_view)
+            views1 = torch.cat(temp_views_1, dim=0)
+
+            for view in views_2:
+                temp_view = T.ToTensor()(view)
+                temp_views_2.append(temp_view)
+            views2 = torch.cat(temp_views_2, dim=0)
+        return views1, views2
+
+def get_data_loader(data_df, batch_size, base_path='Eynsham/Images', transform=None, shuffle=True, num_views=5, fine_tune=False):
+    if fine_tune:
+        dataset = FineTuniningMultiViewImageDataset(data_df, base_path=base_path, transform=transform, num_views=num_views)
+    else:
+        dataset = MultiViewImageDataset(data_df, base_path=base_path, transform=transform, num_views=num_views)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=12)
     return loader
 
@@ -211,11 +267,25 @@ class ContrastiveLoss(nn.Module):
         return loss
 
 class AddProjection(nn.Module):
-    def __init__(self, embedding_size, mlp_dim=512, use_adapter=True):
+    def __init__(self, embedding_size, mlp_dim=512, use_adapter=True, use_native_input_layer=False):
         super(AddProjection, self).__init__()
-        
+
         self.use_adapter = use_adapter
-        if self.use_adapter:
+        self.use_native_input_layer = use_native_input_layer
+
+        self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+
+        if self.use_native_input_layer:
+            original_conv = self.backbone.conv1
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels=5,
+                out_channels=original_conv.out_channels,
+                kernel_size=original_conv.kernel_size,
+                stride=original_conv.stride,
+                padding=original_conv.padding,
+                bias=original_conv.bias is not None
+            )
+        elif self.use_adapter:
 
             self.channel_adapter = nn.Conv2d(
                 in_channels=5, 
@@ -224,11 +294,16 @@ class AddProjection(nn.Module):
                 stride=1
             )
 
-        self.backbone = models.resnet18(weights=None, num_classes=mlp_dim)
         self.backbone.fc = nn.Identity()
 
+        if self.use_native_input_layer:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+            for param in self.backbone.conv1.parameters():
+                param.requires_grad = True
+
         self.projection = nn.Sequential(
-            nn.Linear(in_features=mlp_dim, out_features=mlp_dim),
+            nn.Linear(in_features=self.backbone.fc.in_features if hasattr(self.backbone.fc, 'in_features') else 512, out_features=mlp_dim),
             nn.BatchNorm1d(mlp_dim),
             nn.ReLU(),
             nn.Linear(in_features=mlp_dim, out_features=embedding_size),
@@ -236,19 +311,21 @@ class AddProjection(nn.Module):
         )
 
     def forward(self, x, return_embedding=False):
-        if self.use_adapter:
-            x = self.channel_adapter(x)  # Shape: [B, 5, 224, 224] → [B, 3, 224, 224]
-        embedding = self.backbone(x)
+        if self.use_adapter and not self.use_native_input_layer:
+            x = self.channel_adapter(x)  # [B, 5, H, W] → [B, 3, H, W]
+
+        embedding = self.backbone(x)  # [B, 512]
         if return_embedding:
             return embedding
         return self.projection(embedding)
+
     
 class AddProjectionParallel(nn.Module):
     def __init__(self, embedding_size, mlp_dim=512, view_size=5):
         super(AddProjectionParallel, self).__init__()
 
         self.mlp_dim = mlp_dim
-        self.backbone = models.resnet18(weights=None, num_classes=mlp_dim)
+        self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT, num_classes=mlp_dim)
         self.backbone.fc = nn.Identity()
         self.embedding_concat = nn.Linear(view_size * mlp_dim, mlp_dim)
         self.projection = nn.Sequential(
@@ -293,13 +370,17 @@ def define_param_groups(model, weight_decay, optimizer_name):
 
 
 class SimCLR_pl(pl.LightningModule):
-    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False):
+    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False):
         super().__init__()
+        self.use_adapter = use_adapter
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:
             self.model = AddProjection(embedding_size=embedding_size, mlp_dim=mlp_dim, use_adapter=use_adapter)
         self.loss = ContrastiveLoss(BATCH_SIZE, device, temperature=0.5)
+
+        if freeze_backbone:
+            self.freeze_backbone()
 
     def forward(self, X):
         return self.model(X)
@@ -311,6 +392,24 @@ class SimCLR_pl(pl.LightningModule):
         loss = self.loss(z1, z2)
         self.log('Contrastive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
+    
+    def test_step(self, batch):
+        x1, x2 = batch
+        z1 = self.model(x1)
+        z2 = self.model(x2)
+        loss = self.loss(z1, z2)
+        self.log('Test loss', loss, prog_bar=True)
+        return loss
+    
+    def freeze_backbone(self):
+        for name, param in self.model.backbone.named_parameters():
+            param.requires_grad = False
+
+        if self.use_adapter:
+            for name, param in self.model.channel_adapter.named_parameters():
+                param.requires_grad = False
+
+        print("Backbone frozen for fine-tuning")
 
     def configure_optimizers(self):
         max_epochs = MAX_EPOCHS
