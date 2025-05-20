@@ -29,7 +29,8 @@ from tqdm import tqdm
 
 BATCH_SIZE = 32
 WEIGHT_DECAY = 1e-6
-MAX_EPOCHS = 100
+MAX_EPOCHS = 1 #TODO: change later
+FINE_TUNE_EPOCHS = 3
 OPTIMIZER = "adam"
 LR = 3e-4
 GRADIENT_ACCUMULATION_STEPS = 5
@@ -150,6 +151,31 @@ class MultiViewImageDataset(Dataset):
             views2 = views1
         return views1, views2
     
+
+def plot_views_from_finetunedataset(dataset, index):
+    views1, views2 = dataset[index]
+    
+    num_views = 5
+    _, H, W = views1.shape
+    views1_split = torch.chunk(views1, num_views, dim=0)
+    views2_split = torch.chunk(views2, num_views, dim=0)
+
+    fig, axes = plt.subplots(2, num_views, figsize=(15, 4))
+    for i in range(num_views):
+        img1 = views1_split[i].squeeze().numpy()
+        img2 = views2_split[i].squeeze().numpy()
+
+        axes[0, i].imshow(img1, cmap='gray')
+        axes[0, i].set_title(f'Loc 1 - View {i}')
+        axes[0, i].axis('off')
+
+        axes[1, i].imshow(img2, cmap='gray')
+        axes[1, i].set_title(f'Loc 2 - View {i}')
+        axes[1, i].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+    
 class FineTuniningMultiViewImageDataset(Dataset):
     def __init__(self, dataframe, base_path, num_views=5, transform=None):
         self.df = dataframe
@@ -187,7 +213,7 @@ class FineTuniningMultiViewImageDataset(Dataset):
 
         if self.transform:
             views1, _ = self.transform(views_1)
-            views_2, _ = self.transform(views_2)
+            views2, _ = self.transform(views_2)
 
         else:
             temp_views_1 = []
@@ -373,6 +399,7 @@ class SimCLR_pl(pl.LightningModule):
     def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False):
         super().__init__()
         self.use_adapter = use_adapter
+        self.fine_tune=False
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:
@@ -411,8 +438,13 @@ class SimCLR_pl(pl.LightningModule):
 
         print("Backbone frozen for fine-tuning")
 
+    def set_fine_tuning(self, fine_tune_flag):
+        self.fine_tune = fine_tune_flag
+
     def configure_optimizers(self):
         max_epochs = MAX_EPOCHS
+        if self.fine_tune:
+            max_epochs = FINE_TUNE_EPOCHS
         param_groups = define_param_groups(self.model, WEIGHT_DECAY, OPTIMIZER)
         lr = LR
         optimizer = Adam(param_groups, lr=lr, weight_decay=WEIGHT_DECAY)
