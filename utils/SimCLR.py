@@ -27,10 +27,10 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 WEIGHT_DECAY = 1e-6
 MAX_EPOCHS = 1 #TODO: change later
-FINE_TUNE_EPOCHS = 3
+FINE_TUNE_EPOCHS = 2
 OPTIMIZER = "adam"
 LR = 3e-4
 GRADIENT_ACCUMULATION_STEPS = 5
@@ -152,10 +152,9 @@ class MultiViewImageDataset(Dataset):
         return views1, views2
     
 
-def plot_views_from_finetunedataset(dataset, index):
+def plot_views_from_finetunedataset(dataset, index, num_views=5):
     views1, views2 = dataset[index]
     
-    num_views = 5
     _, H, W = views1.shape
     views1_split = torch.chunk(views1, num_views, dim=0)
     views2_split = torch.chunk(views2, num_views, dim=0)
@@ -293,7 +292,7 @@ class ContrastiveLoss(nn.Module):
         return loss
 
 class AddProjection(nn.Module):
-    def __init__(self, embedding_size, mlp_dim=512, use_adapter=True, use_native_input_layer=False):
+    def __init__(self, embedding_size, mlp_dim=512, use_adapter=True, use_native_input_layer=True):
         super(AddProjection, self).__init__()
 
         self.use_adapter = use_adapter
@@ -301,7 +300,7 @@ class AddProjection(nn.Module):
 
         self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT)
 
-        if self.use_native_input_layer:
+        if not self.use_native_input_layer:
             original_conv = self.backbone.conv1
             self.backbone.conv1 = nn.Conv2d(
                 in_channels=5,
@@ -322,12 +321,6 @@ class AddProjection(nn.Module):
 
         self.backbone.fc = nn.Identity()
 
-        if self.use_native_input_layer:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-            for param in self.backbone.conv1.parameters():
-                param.requires_grad = True
-
         self.projection = nn.Sequential(
             nn.Linear(in_features=self.backbone.fc.in_features if hasattr(self.backbone.fc, 'in_features') else 512, out_features=mlp_dim),
             nn.BatchNorm1d(mlp_dim),
@@ -337,7 +330,7 @@ class AddProjection(nn.Module):
         )
 
     def forward(self, x, return_embedding=False):
-        if self.use_adapter and not self.use_native_input_layer:
+        if self.use_adapter and self.use_native_input_layer:
             x = self.channel_adapter(x)  # [B, 5, H, W] → [B, 3, H, W]
 
         embedding = self.backbone(x)  # [B, 512]
@@ -351,7 +344,7 @@ class AddProjectionParallel(nn.Module):
         super(AddProjectionParallel, self).__init__()
 
         self.mlp_dim = mlp_dim
-        self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT, num_classes=mlp_dim)
+        self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT)
         self.backbone.fc = nn.Identity()
         self.embedding_concat = nn.Linear(view_size * mlp_dim, mlp_dim)
         self.projection = nn.Sequential(
@@ -396,14 +389,14 @@ def define_param_groups(model, weight_decay, optimizer_name):
 
 
 class SimCLR_pl(pl.LightningModule):
-    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False):
+    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False, use_native_input_layer=True):
         super().__init__()
         self.use_adapter = use_adapter
         self.fine_tune=False
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:
-            self.model = AddProjection(embedding_size=embedding_size, mlp_dim=mlp_dim, use_adapter=use_adapter)
+            self.model = AddProjection(embedding_size=embedding_size, mlp_dim=mlp_dim, use_adapter=use_adapter, use_native_input_layer=use_native_input_layer)
         self.loss = ContrastiveLoss(BATCH_SIZE, device, temperature=0.5)
 
         if freeze_backbone:
@@ -420,7 +413,7 @@ class SimCLR_pl(pl.LightningModule):
         self.log('Contrastive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
     
-    def test_step(self, batch):
+    def test_step(self, batch, _):
         x1, x2 = batch
         z1 = self.model(x1)
         z2 = self.model(x2)
