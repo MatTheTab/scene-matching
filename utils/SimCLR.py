@@ -27,10 +27,10 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 
-BATCH_SIZE = 64
+BATCH_SIZE = 64 # 4 for parallel views model, 64 for the rest
 WEIGHT_DECAY = 1e-6
-MAX_EPOCHS = 5
-FINE_TUNE_EPOCHS = 3
+MAX_EPOCHS = 50 #5 for inital tests, 50 for full run
+FINE_TUNE_EPOCHS = 30 # 3 for initial tests, 30 for full run
 OPTIMIZER = "adam"
 LR = 3e-4
 GRADIENT_ACCUMULATION_STEPS = 5
