@@ -387,12 +387,30 @@ def define_param_groups(model, weight_decay, optimizer_name):
     ]
     return param_groups
 
+import torch
+
+def compute_location_distance_matrix(n1, e1, n2, e2):
+    """
+    Computes a [2B, 2B] matrix of Euclidean distances between coordinates from x1 and x2.
+    Inputs:
+        n1, e1: tensors of shape [B] for lat, lon of x1
+        n2, e2: tensors of shape [B] for lat, lon of x2
+    Returns:
+        distances: normalized [2B, 2B] tensor of pairwise distances
+    """
+    coords_1 = torch.stack([n1, e1], dim=1)  # [B, 2]
+    coords_2 = torch.stack([n2, e2], dim=1)  # [B, 2]
+    coords = torch.cat([coords_1, coords_2], dim=0)  # [2B, 2]
+    distances = torch.cdist(coords, coords, p=2)  # [2B, 2B]
+    distances = distances / torch.max(distances)
+    return distances
 
 class SimCLR_pl(pl.LightningModule):
-    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False, use_native_input_layer=True):
+    def __init__(self, embedding_size, mlp_dim, use_adapter=True, parallel_views=False, freeze_backbone=False, use_native_input_layer=True, get_distances=False):
         super().__init__()
         self.use_adapter = use_adapter
-        self.fine_tune=False
+        self.fine_tune = False
+        self.get_distances = True
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:
@@ -402,23 +420,42 @@ class SimCLR_pl(pl.LightningModule):
         if freeze_backbone:
             self.freeze_backbone()
 
+    def switch_loss(self, loss):
+        self.loss = loss
+
     def forward(self, X):
         return self.model(X)
 
     def training_step(self, batch):
-        x1, x2 = batch
-        z1 = self.model(x1)
-        z2 = self.model(x2)
-        loss = self.loss(z1, z2)
-        self.log('Contrastive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        if not self.get_distances:
+            x1, x2 = batch
+            z1 = self.model(x1)
+            z2 = self.model(x2)
+            loss = self.loss(z1, z2)
+            self.log('Contrastive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        else:
+            x1, x2, n1, e1, n2, e2 = batch
+            distances = compute_location_distance_matrix(n1, e1, n2, e2)
+            z1 = self.model(x1)
+            z2 = self.model(x2)
+            loss = self.loss(z1, z2, distances)
+            self.log('Distance-Sensitive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
     
     def test_step(self, batch, _):
-        x1, x2 = batch
-        z1 = self.model(x1)
-        z2 = self.model(x2)
-        loss = self.loss(z1, z2)
-        self.log('Test loss', loss, prog_bar=True)
+        if not self.get_distances:
+            x1, x2 = batch
+            z1 = self.model(x1)
+            z2 = self.model(x2)
+            loss = self.loss(z1, z2)
+            self.log('Test loss', loss, prog_bar=True)
+        else:
+            x1, x2, n1, e1, n2, e2 = batch
+            distances = compute_location_distance_matrix(n1, e1, n2, e2)
+            z1 = self.model(x1)
+            z2 = self.model(x2)
+            loss = self.loss(z1, z2, distances)
+            self.log('Distance-Sensitive loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
     
     def freeze_backbone(self):
