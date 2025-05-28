@@ -403,6 +403,7 @@ def compute_location_distance_matrix(n1, e1, n2, e2):
     coords = torch.cat([coords_1, coords_2], dim=0)  # [2B, 2]
     distances = torch.cdist(coords, coords, p=2)  # [2B, 2B]
     distances = distances / torch.max(distances)
+    distances += 1e-4
     return distances
 
 class SimCLR_pl(pl.LightningModule):
@@ -410,7 +411,7 @@ class SimCLR_pl(pl.LightningModule):
         super().__init__()
         self.use_adapter = use_adapter
         self.fine_tune = False
-        self.get_distances = False
+        self.get_distances = get_distances
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:

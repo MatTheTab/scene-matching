@@ -1,5 +1,12 @@
 from utils.SimCLR import *
 
+def get_positive_pairs(similarity_matrix, batch_size):
+    device = similarity_matrix.device
+    indices = torch.arange(batch_size).to(device)
+    sim_ij = similarity_matrix[indices, indices + batch_size]
+    sim_ji = similarity_matrix[indices + batch_size, indices]
+    return torch.cat([sim_ij, sim_ji], dim=0)
+
 class InverseDistanceContrastiveLoss(ContrastiveLoss):
     def __init__(self, batch_size, device, temperature=0.5, epsilon=1e-8):
         super().__init__(batch_size, device, temperature)
@@ -57,7 +64,7 @@ class SoftDenominatorContrastiveLoss(ContrastiveLoss):
         loss = torch.sum(all_losses) / (2 * batch_size)
         return loss
     
-class TempretureScalingContrastiveLoss(ContrastiveLoss):
+class TemperatureScalingContrastiveLoss(ContrastiveLoss):
     def __init__(self, batch_size, device, temperature=0.5, epsilon=1e-8):
         super().__init__(batch_size, device, temperature)
         self.epsilon = epsilon
