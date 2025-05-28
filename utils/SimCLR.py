@@ -410,7 +410,7 @@ class SimCLR_pl(pl.LightningModule):
         super().__init__()
         self.use_adapter = use_adapter
         self.fine_tune = False
-        self.get_distances = True
+        self.get_distances = False
         if parallel_views:
             self.model = AddProjectionParallel(embedding_size=embedding_size, mlp_dim=mlp_dim)
         else:
